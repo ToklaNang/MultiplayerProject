@@ -12,8 +12,8 @@ SOCKET createSocket(const char *hostname, const char *port);
 
 SOCKET createSocket(const char *hostname, const char *port)
 {
-  bool server = (hostname == NULL)
-    ? true : false;
+  BOOL server = (hostname == NULL)
+    ? TRUE : FALSE;
 
   struct addrinfo *res = NULL,
                    hints;
@@ -36,7 +36,7 @@ SOCKET createSocket(const char *hostname, const char *port)
     return INVALID_SOCKET;
   }
 
-  if (select) {
+  if (server) {
     iResult = bind(sock, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
     
