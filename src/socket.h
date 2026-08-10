@@ -1,8 +1,53 @@
 #ifndef SOCKET_H
 #define SOCKET_H
 
+#ifdef WIN_API_REDUCED
+#define WIN32_LEAN_AND_MEAN
+#define VC_EXTRALEAN
+#define NOUSER
+#define NOGDI
+#endif
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <stdint.h>
+
+// Write data to byte
+#define _writePacket(buff, offset, data) \
+do {                                     \
+  __typeof__(data) _data   = data;       \
+                                         \
+  size_t _len = sizeof(_data);           \
+  memcpy(buff + offset, &_data, _len);   \
+  offset += _len;                        \
+} while (0)                             
+
+// Read data from byte
+#define _readPacket(buff, offset, outType) \
+({                                         \
+  outType _data;                           \
+                                           \
+  size_t _len = sizeof(_data);             \
+  memcpy(&_data, buff + offset, _len);     \
+  offset += _len; _data;                   \
+})
+
+
+uint32_t htonf(float value)
+{
+  uint32_t result;
+  memcpy(&result, &value, sizeof(result));
+
+  return htonl(result);
+}
+float ntohf(uint32_t net)
+{
+  uint32_t host = ntohl(net);
+  float   result;
+ 
+  memcpy(&result, &host, sizeof(result));
+  return result;
+}
 
 // Create a socket
 // If hostname is NULL, create server

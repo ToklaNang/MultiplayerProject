@@ -1,11 +1,49 @@
-#define SOCKET_IMPLEMENTATION
-#include "socket.h"
-#include <string.h>
-#include <stdio.h>
+#define GLOBAL_IMPLEMENTATION
+#include "global.h"
+#include <vector.h>
 
-SOCKET server            = INVALID_SOCKET;
-BOOL   serverShouldClose = FALSE;
+typedef _vectorObject(playerInfo) vecPlayerInfo;
 
+SOCKET        server            = INVALID_SOCKET;
+vecPlayerInfo players           = _vectorEmpty(vecPlayerInfo);
+BOOL          serverShouldClose = FALSE;
+uint32_t      serverIdCounter   = 1;
+
+void handleClientRequest(requestInfo ri, SOCKADDR_IN from, int len)
+{
+  const char *ipAddr = inet_ntoa(from.sin_addr);
+
+  switch (ri.type) {
+  case REQUEST_TYPE_ENTRY: {
+    playerInfo p = unserializePlayer(ri.payload); 
+    p.id         = serverIdCounter++;
+
+    uint32_t net = htonl(p.id);
+    sendto(server, (char*)&net, sizeof(net), 0, (SOCKADDR*)&from, len);
+
+    printf("Player %d joined [%s]\n", p.id, ipAddr);
+    _pushBack(players, p);
+    break;
+  }
+  case REQUEST_TYPE_EXIT: {
+    playerInfo p = unserializePlayer(ri.payload);
+
+    for (int n = 0; n < players.len; n++) {
+      playerInfo currP = _at(players, n);
+      if (currP.id != p.id) continue;
+
+      _popIndex(players, n);
+      
+      printf("Player %d left [%s]\n", p.id, ipAddr);
+      break;
+    }
+    break;
+  }
+  default: break;
+  }
+
+  free(ri.payload);
+}
 int consoleCtrlHandler(DWORD ctrlType)
 {
   closesocket(server);
@@ -39,19 +77,19 @@ int main(int argc, char **argv)
     return -3;
   }
   printf("Server bound to port %s\n", argv[1]);
-
-  char buff[1024];
+  
+  requestInfo ri;
 
   while (!serverShouldClose) {
-    memset(buff, 0, sizeof(buff));
-    
+    memset(&ri, 0, sizeof(ri));
+
     SOCKADDR_IN from;
     int         len = sizeof(from);
-    
-    int byteRecv = recvfrom(server, buff, sizeof(buff), 0, (SOCKADDR*)&from, &len);
 
-    if (byteRecv > 0)
-      printf("%s", buff);
+    int recvByte = recvRequestFrom(server, &ri, &from, &len);
+    if (recvByte <= 0) continue;
+
+    handleClientRequest(ri, from, len);
   }
 
   closesocket(server);
