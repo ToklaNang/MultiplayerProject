@@ -6,8 +6,8 @@
 #include <stdlib.h>
 #include <time.h>
 
-#define WINDOW_WIDTH  1280
-#define WINDOW_HEIGHT 720
+#define WINDOW_WIDTH  800
+#define WINDOW_HEIGHT 800
 #define WINDOW_TITLE  "MP Proj"
 
 typedef struct threadArgs         threadArgs;
@@ -145,7 +145,7 @@ int main(int argc, char **argv)
 
   while (!WindowShouldClose() || clientShouldClose) {
     BeginDrawing();
-    ClearBackground(DARKGRAY);
+    ClearBackground(WHITE);
 
     if (IsKeyDown(KEY_A))
       velocity.x -= 100.0f;
@@ -173,8 +173,11 @@ int main(int argc, char **argv)
 
     while (!queueEmpty(&dq)) {
       playerInfo p = queuePop(&dq);
+
+      if (p.id == player.id) continue;
       DrawRectangleV(p.pos, p.size, p.color);
     }
+    DrawRectangleV(player.pos, player.size, player.color);
     
     EndDrawing();
   }
