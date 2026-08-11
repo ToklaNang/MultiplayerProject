@@ -25,6 +25,39 @@ void handleClientRequest(requestInfo ri, SOCKADDR_IN from, int len)
     _pushBack(players, p);
     break;
   }
+  case REQUEST_TYPE_UPDATE: {  
+    playerInfo p = unserializePlayer(ri.payload);
+
+    int index = -1;
+
+    for (int n = 0; n < players.len; n++) {
+      playerInfo currP = _at(players, n);
+      if (currP.id != p.id) continue;
+
+      index = n;
+      break;
+    }
+
+    if (index == -1) break;
+
+    players.items[index] = p;
+    break;
+  }
+  case REQUEST_TYPE_GETSTATE: {
+    uint32_t net = htonl(players.len);
+    sendto(server, (char*)&net, sizeof(net), 0, (SOCKADDR*)&from, len);
+
+    for (int n = 0; n < players.len; n++) {
+      playerInfo currP = _at(players, n);
+
+      char *packet = serializePlayer(currP);
+      if (packet == NULL) continue;
+
+      sendto(server, packet, sizeof(currP), 0, (SOCKADDR*)&from, len);
+      free(packet);
+    }
+    break;
+  }
   case REQUEST_TYPE_EXIT: {
     playerInfo p = unserializePlayer(ri.payload);
 
@@ -81,6 +114,16 @@ int main(int argc, char **argv)
   requestInfo ri;
 
   while (!serverShouldClose) {
+    // Vertify player data
+    for (int n = 0; n < players.len; n++) {
+      playerInfo currP = _at(players, n);
+    
+      if (currP.id > 0) continue;
+      
+      printf("Unresponsive player removed\n");
+      _popIndex(players, n); 
+      n = 0; // Reset (Since we modify the list while iterating through)
+    }
     memset(&ri, 0, sizeof(ri));
 
     SOCKADDR_IN from;

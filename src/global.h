@@ -9,15 +9,18 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define REQUEST_TYPE_ENTRY 0
-#define REQUEST_TYPE_EXIT  1
+#define REQUEST_TYPE_ENTRY    0
+#define REQUEST_TYPE_EXIT     1
+#define REQUEST_TYPE_UPDATE   2
+#define REQUEST_TYPE_GETSTATE 3
 
 typedef struct playerInfo  playerInfo;
 typedef struct requestInfo requestInfo;
 
 struct playerInfo {
   uint32_t id;
-  Vector2  pos;
+  Color    color;
+  Vector2  pos, size;
 };
 struct requestInfo {
   uint32_t  type;
@@ -30,11 +33,6 @@ void sendRequestTo(SOCKET s, requestInfo ri, SOCKADDR_IN *to, int len);
 int  recvRequest(SOCKET s, requestInfo *out);
 int  recvRequestFrom(SOCKET s, requestInfo *out, SOCKADDR_IN *from, int *len);
 
-Vector2    v2ToHost(Vector2 net);
-Vector2    v2ToNet(Vector2 host);
-playerInfo playerToHost(playerInfo net);
-playerInfo playerToNet(playerInfo host);
-
 char       *serializePlayer(playerInfo p);
 playerInfo  unserializePlayer(char *packet);
 
@@ -42,23 +40,27 @@ playerInfo  unserializePlayer(char *packet);
 
 void sendRequest(SOCKET s, requestInfo ri)
 {
-  char   packet[sizeof(ri)];
+  char   packet[sizeof(uint32_t) + sizeof(size_t) + ri.len];
   size_t offset = 0;
 
   _writePacket(packet, offset, (uint32_t)htonl(ri.type));
   _writePacket(packet, offset, (size_t)  htonl(ri.len));
-  memcpy(packet + offset, ri.payload, ri.len);
+
+  if (ri.len > 0 && ri.payload != NULL)
+    memcpy(packet + offset, ri.payload, ri.len);
 
   send(s, packet, sizeof(packet), 0);
 }
 void sendRequestTo(SOCKET s, requestInfo ri, SOCKADDR_IN *to, int len)
 {
-  char   packet[sizeof(ri)];
+  char   packet[sizeof(uint32_t) + sizeof(size_t) + ri.len];
   size_t offset = 0;
 
   _writePacket(packet, offset, (uint32_t)htonl(ri.type));
   _writePacket(packet, offset, (size_t)  htonl(ri.len));
-  memcpy(packet + offset, ri.payload, ri.len);
+
+  if (ri.len > 0 && ri.payload != NULL)
+    memcpy(packet + offset, ri.payload, ri.len);
 
   sendto(s, packet, sizeof(packet), 0, (SOCKADDR*)to, len);
 }
@@ -70,13 +72,18 @@ int recvRequest(SOCKET s, requestInfo *out)
 
   out->type = ntohl(_readPacket(packet, offset, uint32_t));
   out->len  = ntohl(_readPacket(packet, offset, size_t));
+  
+  if (out->len <= 0) {
+    out->payload = NULL;
+    goto endFunc;
+  }
 
   out->payload = (char*)malloc(out->len);
   if (out->payload == NULL)
     return 0;
-  
   memcpy(out->payload, packet + offset, out->len);
 
+  endFunc:
   return recvByte;
 }
 int recvRequestFrom(SOCKET s, requestInfo *out, SOCKADDR_IN *from, int *len)
@@ -88,41 +95,56 @@ int recvRequestFrom(SOCKET s, requestInfo *out, SOCKADDR_IN *from, int *len)
   out->type = ntohl(_readPacket(packet, offset, uint32_t));
   out->len  = ntohl(_readPacket(packet, offset, size_t));
 
+  if (out->len <= 0) {
+    out->payload = NULL;
+    goto endFunc;
+  }
+
   out->payload = (char*)malloc(out->len);
   if (out->payload == NULL)
     return 0;
-
   memcpy(out->payload, packet + offset, out->len);
+  
+  endFunc:
   return recvByte;
 }
-
-Vector2    v2ToHost(Vector2 net)        { return (Vector2){ntohf(net.x), ntohf(net.y)};           }
-Vector2    v2ToNet(Vector2 host)        { return (Vector2){htonf(host.x), htonf(host.y)};         }
-playerInfo playerToHost(playerInfo net) { return (playerInfo){ntohl(net.id), v2ToHost(net.pos)};  }
-playerInfo playerToNet(playerInfo host) { return (playerInfo){htonl(host.id), v2ToNet(host.pos)}; }
-
 char *serializePlayer(playerInfo p)
 {
-  char       *packet = (char*)malloc(sizeof(p));
-  playerInfo  net    = playerToNet(p);
-  size_t      offset = 0;
+  char *packet = (char*)malloc(sizeof(p));
+  if (packet == NULL)
+    return NULL;
 
-  _writePacket(packet, offset, net.id);
-  _writePacket(packet, offset, net.pos.x);
-  _writePacket(packet, offset, net.pos.y);
+  size_t offset = 0;
+  _writePacket(packet, offset, htonl(p.id));
+  _writePacket(packet, offset, htonf(p.pos.x));
+  _writePacket(packet, offset, htonf(p.pos.y));
+  _writePacket(packet, offset, htonf(p.size.x));
+  _writePacket(packet, offset, htonf(p.size.y));
+
+  _writePacket(packet, offset, p.color.r);
+  _writePacket(packet, offset, p.color.g);
+  _writePacket(packet, offset, p.color.b);
+  _writePacket(packet, offset, p.color.a);
 
   return packet;
 }
 playerInfo unserializePlayer(char *packet)
-{
-  playerInfo net;
+{ 
+  playerInfo host   = {0};
   size_t     offset = 0;
 
-  net.id    = _readPacket(packet, offset, uint32_t);
-  net.pos.x = _readPacket(packet, offset, float);
-  net.pos.y = _readPacket(packet, offset, float);
+  host.id     = ntohl(_readPacket(packet, offset, uint32_t));
+  host.pos.x  = ntohf(_readPacket(packet, offset, uint32_t));
+  host.pos.y  = ntohf(_readPacket(packet, offset, uint32_t));
+  host.size.x = ntohf(_readPacket(packet, offset, uint32_t));
+  host.size.y = ntohf(_readPacket(packet, offset, uint32_t));
 
-  return playerToHost(net);
+  host.color.r = _readPacket(packet, offset, uint8_t);
+  host.color.g = _readPacket(packet, offset, uint8_t);
+  host.color.b = _readPacket(packet, offset, uint8_t);
+  host.color.a = _readPacket(packet, offset, uint8_t);
+
+  return host;
 }
 
 #endif

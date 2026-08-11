@@ -13,25 +13,33 @@
 #include <stdint.h>
 
 // Write data to byte
-#define _writePacket(buff, offset, data) \
-do {                                     \
-  __typeof__(data) _data   = data;       \
-                                         \
-  size_t _len = sizeof(_data);           \
-  memcpy(buff + offset, &_data, _len);   \
-  offset += _len;                        \
-} while (0)                             
+#define _writePacket(_buff, _offset, _data) \
+do {                                        \
+  __typeof__(_data) __data = _data;         \
+                                            \
+  size_t __len = sizeof(__data);            \
+  memcpy(_buff + _offset, &__data, __len);  \
+  _offset += __len;                         \
+} while (0)
 
 // Read data from byte
-#define _readPacket(buff, offset, outType) \
-({                                         \
-  outType _data;                           \
-                                           \
-  size_t _len = sizeof(_data);             \
-  memcpy(&_data, buff + offset, _len);     \
-  offset += _len; _data;                   \
+#define _readPacket(_buff, _offset, _outType) \
+({                                            \
+  _outType __data;                            \
+                                              \
+  size_t __len = sizeof(__data);              \
+  memcpy(&__data, _buff + _offset, __len);    \
+  _offset += __len; __data;                   \
 })
 
+uint32_t htonf(float value);
+float ntohf(uint32_t net);
+
+// Create a socket
+// If hostname is NULL, create server
+SOCKET createSocket(const char *hostname, const char *port);
+
+#ifdef SOCKET_IMPLEMENTATION
 
 uint32_t htonf(float value)
 {
@@ -48,13 +56,6 @@ float ntohf(uint32_t net)
   memcpy(&result, &host, sizeof(result));
   return result;
 }
-
-// Create a socket
-// If hostname is NULL, create server
-SOCKET createSocket(const char *hostname, const char *port);
-
-#ifdef SOCKET_IMPLEMENTATION
-
 SOCKET createSocket(const char *hostname, const char *port)
 {
   BOOL server = (hostname == NULL)

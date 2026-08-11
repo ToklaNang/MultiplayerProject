@@ -1,21 +1,41 @@
 #define GLOBAL_IMPLEMENTATION
 #include <pthread.h>
 #include "global.h"
+#include <raymath.h>
+#include <vector.h>
+#include <stdlib.h>
+#include <time.h>
 
 #define WINDOW_WIDTH  1280
 #define WINDOW_HEIGHT 720
 #define WINDOW_TITLE  "MP Proj"
 
-typedef struct threadArgs threadArgs;
+typedef struct threadArgs         threadArgs;
+typedef struct drawQueue          drawQueue;
+typedef _vectorObject(playerInfo) vecPlayerInfo;
 
 struct threadArgs {
   char *ipAddr; 
   char *port;
 };
+struct drawQueue {
+  playerInfo items[256];
+  int tail, head;
+};
 
-playerInfo player;
-SOCKET     client            = INVALID_SOCKET;
-BOOL       clientShouldClose = FALSE;
+drawQueue     dq;
+playerInfo    player;
+SOCKET        client            = INVALID_SOCKET;
+BOOL          clientShouldClose = FALSE;
+
+void queueClear(drawQueue *q) { q->head = q->tail = 0; }
+bool queueEmpty(drawQueue *q) { return q->head == q->tail; }
+playerInfo queuePop(drawQueue *q) { return q->items[q->head++ % 256]; }
+void queuePush(drawQueue  *q, playerInfo x)
+{
+  if (q->tail - q->head > 256) return;
+  q->items[q->tail++ % 256] = x;
+}
 
 void *handleServerConnection(void *args)
 {
@@ -43,7 +63,7 @@ void *handleServerConnection(void *args)
   ri.payload = serializePlayer(player);
   ri.type    = REQUEST_TYPE_ENTRY;
   ri.len     = sizeof(player);
-  sendRequest(client, ri);
+  sendRequest(client, ri); free(ri.payload);
 
   // Get server assigned id
   uint32_t net;
@@ -52,17 +72,35 @@ void *handleServerConnection(void *args)
   player.id = ntohl(net);
 
   while (!clientShouldClose) {
+    ri.payload = serializePlayer(player);
+    ri.type    = REQUEST_TYPE_UPDATE;
+    ri.len     = sizeof(player);
+    sendRequest(client, ri); free(ri.payload);
 
+    ri.len     = 0;
+    ri.payload = NULL;
+    ri.type    = REQUEST_TYPE_GETSTATE;
+    sendRequest(client, ri);
+
+    uint32_t net;     recv(client, (char*)&net, sizeof(net), 0);
+    uint32_t pCount = ntohl(net);
+
+    for (int n = 0; n < pCount; n++) {
+      char packet[sizeof(player)];
+      recv(client, packet, sizeof(packet), 0);
+
+      playerInfo p = unserializePlayer(packet);
+      queuePush(&dq, p);
+    }
   }
 
   // Exit request
   ri.payload = serializePlayer(player);
   ri.type    = REQUEST_TYPE_EXIT;
   ri.len     = sizeof(player);
-  sendRequest(client, ri);
+  sendRequest(client, ri); free(ri.payload);
 
   closesocket(client);
-  free(ri.payload);
   WSACleanup();
 }
 int consoleCtrlHandler(DWORD ctrlType)
@@ -78,9 +116,17 @@ int main(int argc, char **argv)
     return -1;
   }
   SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+  
+  queueClear(&dq);
+  srand(time(NULL));
+  player.id    = 0; // Not assigned yet
+  player.color = (Color)  {rand() % 255, rand() % 255, rand() % 255, 255};
+  player.size  = (Vector2){100.0f, 100.0f};
+  player.pos   = (Vector2){WINDOW_WIDTH / 2.0f - 50.0f, 20.0f};
 
-  player.id  = 0; // Not assigned yet
-  player.pos = (Vector2){0.0f, 0.0f};
+  float   gravity  = 9.81f;
+  bool    onGround = false;
+  Vector2 velocity = {0.0f, 0.0f};
 
   // Create another thread to handle network while the
   // main thread run the game
@@ -99,8 +145,37 @@ int main(int argc, char **argv)
 
   while (!WindowShouldClose() || clientShouldClose) {
     BeginDrawing();
-    ClearBackground(WHITE);
+    ClearBackground(DARKGRAY);
 
+    if (IsKeyDown(KEY_A))
+      velocity.x -= 100.0f;
+    if (IsKeyDown(KEY_D))
+      velocity.x += 100.0f;
+    if (IsKeyPressed(KEY_SPACE) && onGround)
+      velocity.y -= 450.0f;
+
+    velocity.x *= 0.75f;
+    velocity.y += gravity;
+
+    Vector2 step = Vector2Scale(velocity, GetFrameTime());
+    if (player.pos.y + player.size.y + step.y >= WINDOW_HEIGHT) {
+      float penetration = (player.pos.y + player.size.y + step.y) - WINDOW_HEIGHT;
+
+      Vector2 norm = {0.0f, -1.0f};
+      step = Vector2Add(step, Vector2Scale(norm, penetration));
+
+      velocity.y = 0.0f;
+      onGround   = true;
+    } else
+      onGround = false;
+
+    player.pos = Vector2Add(player.pos, step);
+
+    while (!queueEmpty(&dq)) {
+      playerInfo p = queuePop(&dq);
+      DrawRectangleV(p.pos, p.size, p.color);
+    }
+    
     EndDrawing();
   }
   clientShouldClose = TRUE;
