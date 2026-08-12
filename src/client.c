@@ -1,189 +1,188 @@
 #define GLOBAL_IMPLEMENTATION
+#include "global.h"
+
+#define GLOBAL_IMPLEMENTATION
 #include <pthread.h>
 #include "global.h"
-#include <raymath.h>
-#include <vector.h>
-#include <stdlib.h>
-#include <time.h>
+#include <stdio.h>
 
-#define WINDOW_WIDTH  800
-#define WINDOW_HEIGHT 800
-#define WINDOW_TITLE  "MP Proj"
-
-typedef struct threadArgs         threadArgs;
-typedef struct drawQueue          drawQueue;
-typedef _vectorObject(playerInfo) vecPlayerInfo;
+typedef struct threadArgs threadArgs;
+typedef struct drawQueue  drawQueue;
 
 struct threadArgs {
-  char *ipAddr; 
-  char *port;
+  const char *ipAddr;
+  const char *port;
 };
 struct drawQueue {
-  playerInfo items[256];
-  int tail, head;
+  playerState items[256];
+  int         tail, head;
 };
 
-drawQueue     dq;
-playerInfo    player;
-SOCKET        client            = INVALID_SOCKET;
-BOOL          clientShouldClose = FALSE;
+eventInfo currEvent;
+uint32_t  assignedId        = 0;
+SOCKET    client            = INVALID_SOCKET;
+bool      clientIsReady     = false;
+bool      clientShouldClose = false;
 
-void queueClear(drawQueue *q) { q->head = q->tail = 0; }
-bool queueEmpty(drawQueue *q) { return q->head == q->tail; }
-playerInfo queuePop(drawQueue *q) { return q->items[q->head++ % 256]; }
-void queuePush(drawQueue  *q, playerInfo x)
+vecPlayerState prevState = _vectorEmpty(vecPlayerState);
+vecPlayerState currState = _vectorEmpty(vecPlayerState);
+bool           isWriting = false;
+
+void queueClear(drawQueue *q)      { q->head = q->tail = 0; }
+bool queueEmpty(drawQueue *q)      { return q->head == q->tail; }
+playerState queuePop(drawQueue *q) { return q->items[q->head++ % 256]; }
+void queuePush(drawQueue  *q, playerState x)
 {
   if (q->tail - q->head > 256) return;
   q->items[q->tail++ % 256] = x;
 }
-
-void *handleServerConnection(void *args)
+void terminateClient()
 {
-  threadArgs ta = *(threadArgs*)args;
-  WSADATA    wsaData;
+  sendPacket(client, packetClient(PKT_PLAYER_LEFT, assignedId, NULL, 0));
 
-  // Winsock version 2.2
+  closesocket(client);
+  clientShouldClose = true;
+}
+void *handleClientConnection(void *args)
+{
+  WSADATA wsaData;
+
   int iResult = WSAStartup(MAKEWORD(2, 2), &wsaData);
   if (iResult != 0) {
-    fprintf(stderr, "Failed to initialize winsock\n");
+    clientShouldClose = true;
     return NULL;
   }
+  threadArgs inputArgs = *(threadArgs*)args;
 
-  client = createSocket(ta.ipAddr, ta.port);
+  client = createSocket(inputArgs.ipAddr, inputArgs.port);
   if (client == INVALID_SOCKET) {
-    fprintf(stderr, "Failed to create socket\n");
+    fprintf(stderr, "ERROR: Failed to create socket\n");
     
+    clientShouldClose = true;
     WSACleanup();
+    return NULL; 
+  }
+
+  // Halt the client to not join the server until the
+  // Client GUI complete it's setup
+  while (!clientIsReady) {}
+
+  // Request to join server
+  sendPacket(client, packetClient(PKT_REQUEST_JOIN, 0, NULL, 0));
+  packetInfo p;
+
+  int byteRecv = recvPacket(client, &p);
+  if (byteRecv <= 0) {
+    clientShouldClose = true;
     return NULL;
   }
 
-  requestInfo ri;
-
-  // Entry request
-  ri.payload = serializePlayer(player);
-  ri.type    = REQUEST_TYPE_ENTRY;
-  ri.len     = sizeof(player);
-  sendRequest(client, ri); free(ri.payload);
-
-  // Get server assigned id
-  uint32_t net;
-  recv(client, (char*)&net, sizeof(net), 0);
-
-  player.id = ntohl(net);
+  if (p.type == PKT_REJECT_JOIN) {
+    char *rejectMsg = p.payload;
+    
+    fprintf(stderr, "CLIENT: Reject by server (Reason: %s)\n", rejectMsg);
+    clientShouldClose = true;
+    return NULL;
+  }
+  assignedId = ntohl(*(uint32_t*)p.payload);
 
   while (!clientShouldClose) {
-    ri.payload = serializePlayer(player);
-    ri.type    = REQUEST_TYPE_UPDATE;
-    ri.len     = sizeof(player);
-    sendRequest(client, ri); free(ri.payload);
+    char eventPacket[sizeof(currEvent)];
+    serializeEvent(eventPacket, currEvent);
+    sendPacket(client, packetClient(PKT_PLAYER_UPDATE, assignedId, eventPacket, sizeof(eventPacket)));
 
-    ri.len     = 0;
-    ri.payload = NULL;
-    ri.type    = REQUEST_TYPE_GETSTATE;
-    sendRequest(client, ri);
+    packetInfo p;
+    recvPacket(client, &p);
 
-    uint32_t net;     recv(client, (char*)&net, sizeof(net), 0);
-    uint32_t pCount = ntohl(net);
+    switch (p.type) {
+    case PKT_FORCE_CLOSE: {
+      terminateClient();
+      break;
+    }
+    case PKT_WORLD_SNAP: {
+      isWriting = true;
+      
+      int    amount = p.payloadSize / sizeof(playerState);
+      size_t offset = 0;
 
-    for (int n = 0; n < pCount; n++) {
-      char packet[sizeof(player)];
-      recv(client, packet, sizeof(packet), 0);
+      _vecDes(currState);
+      for (int n = 0; n < amount; n++) {
+        playerState state = unserializePlayer(p.payload + offset);
+        _pushBack(currState, state);
+      }
 
-      playerInfo p = unserializePlayer(packet);
-      queuePush(&dq, p);
+      isWriting = false;
+
+      _vecDes(prevState);
+      for (int n = 0; n < currState.len; n++)
+        _pushBack(prevState, _at(currState, n));
+      
+      break;
+    }
+    default: break;
     }
   }
 
-  // Exit request
-  ri.payload = serializePlayer(player);
-  ri.type    = REQUEST_TYPE_EXIT;
-  ri.len     = sizeof(player);
-  sendRequest(client, ri); free(ri.payload);
-
-  closesocket(client);
   WSACleanup();
+  return NULL;
 }
-int consoleCtrlHandler(DWORD ctrlType)
+int consoleCtrlHandler(unsigned long ctrlType)
 {
-  clientShouldClose = TRUE; 
-  return TRUE;
+  terminateClient();
+  return true; // Tell window that it's handled
 }
 
 int main(int argc, char **argv)
 {
   if (argc < 3) {
-    fprintf(stderr, "Expected 2 arguments (ip, port)\n");
+    fprintf(stderr, "ERROR: Expected an argument (ip port)\n");
     return -1;
   }
-  SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
-  
-  queueClear(&dq);
-  srand(time(NULL));
-  player.id    = 0; // Not assigned yet
-  player.color = (Color)  {rand() % 255, rand() % 255, rand() % 255, 255};
-  player.size  = (Vector2){100.0f, 100.0f};
-  player.pos   = (Vector2){WINDOW_WIDTH / 2.0f - 50.0f, 20.0f};
+  SetConsoleCtrlHandler(consoleCtrlHandler, true);
 
-  float   gravity  = 9.81f;
-  bool    onGround = false;
-  Vector2 velocity = {0.0f, 0.0f};
-
-  // Create another thread to handle network while the
-  // main thread run the game
-  pthread_t worker;
-
-  threadArgs args;
+  struct threadArgs args;
   args.ipAddr = argv[1];
   args.port   = argv[2];
 
-  pthread_create(&worker, NULL, handleServerConnection, (void*)&args);
+  // Create another thread to handle client->server connection
+  // while the main thread handle main game
+  pthread_t worker;
+  pthread_create(&worker, NULL, handleClientConnection, (void*)&args);
 
-  SetTraceLogLevel(LOG_WARNING);
-  
-  InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE);
-  SetWindowState(FLAG_VSYNC_HINT);
+  SetTraceLogLevel(LOG_NONE);
+  InitWindow(CLIENT_WINDOW_WIDTH, CLIENT_WINDOW_HEIGHT, "Client");
+  SetTargetFPS(60);
 
-  while (!WindowShouldClose() || clientShouldClose) {
+  clientIsReady = true;
+  while (!WindowShouldClose() && !clientShouldClose) {
     BeginDrawing();
     ClearBackground(WHITE);
 
-    if (IsKeyDown(KEY_A))
-      velocity.x -= 100.0f;
-    if (IsKeyDown(KEY_D))
-      velocity.x += 100.0f;
-    if (IsKeyPressed(KEY_SPACE) && onGround)
-      velocity.y -= 450.0f;
+    currEvent.leftKeyDown  = (IsKeyDown(KEY_A))     ? true : false;
+    currEvent.rightKeyDown = (IsKeyDown(KEY_D))     ? true : false;
+    currEvent.jmpKeyDown   = (IsKeyDown(KEY_SPACE)) ? true : false;
 
-    velocity.x *= 0.75f;
-    velocity.y += gravity;
+    // If the world states is updating, fall back
+    // to draw using the previus state instead to
+    // avoid reading/writing at the same time
+    if (isWriting) {
+      for (int n = 0; n < prevState.len; n++) {
+        playerState ps = _at(prevState, n);
 
-    Vector2 step = Vector2Scale(velocity, GetFrameTime());
-    if (player.pos.y + player.size.y + step.y >= WINDOW_HEIGHT) {
-      float penetration = (player.pos.y + player.size.y + step.y) - WINDOW_HEIGHT;
+        DrawRectangleV(ps.position, ps.scale, ps.color);
+      }
+    } else {
+      for (int n = 0; n < currState.len; n++) {
+        playerState ps = _at(currState, n);
 
-      Vector2 norm = {0.0f, -1.0f};
-      step = Vector2Add(step, Vector2Scale(norm, penetration));
-
-      velocity.y = 0.0f;
-      onGround   = true;
-    } else
-      onGround = false;
-
-    player.pos = Vector2Add(player.pos, step);
-
-    while (!queueEmpty(&dq)) {
-      playerInfo p = queuePop(&dq);
-
-      if (p.id == player.id) continue;
-      DrawRectangleV(p.pos, p.size, p.color);
+        DrawRectangleV(ps.position, ps.scale, ps.color);
+      }
     }
-    DrawRectangleV(player.pos, player.size, player.color);
-    
+
     EndDrawing();
   }
-  clientShouldClose = TRUE;
+  terminateClient();
 
   pthread_join(worker, NULL);
-  CloseWindow();
   return 0;
 }
