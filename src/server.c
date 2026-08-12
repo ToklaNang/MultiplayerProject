@@ -25,16 +25,10 @@ void handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len)
   switch (p.type) {
   case PKT_REQUEST_JOIN: {
     bool shouldJoin = true;
-
-    for (int n = 0; n < players.len; n++) {
-      playerInfo currP = _at(players, n);
-
-      if (strcmp(ipAddr, inet_ntoa(currP.ipAddr.sin_addr)) != 0) 
-        continue;
-      
-      shouldJoin = false; 
-      break;
-    }
+    
+    // I don't have scenario in mind right now
+    // that the server have to reject the client
+    // so for now it's just always gonna accept
 
     if (shouldJoin) {
       playerInfo newPlayer;
@@ -46,7 +40,7 @@ void handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len)
       newPlayer.state.position = (Vector2){  0.0f,   0.0f};
       newPlayer.state.scale    = (Vector2){100.0f, 100.0f};
       newPlayer.state.color    = (Color)  {rand() % 255, rand() % 255, rand() % 255, 255};
-      
+
       _pushBack(players, newPlayer);
 
       uint32_t idNet = htonl(newPlayer.id);
@@ -55,7 +49,7 @@ void handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len)
       
       printf("SERVER: Player %d joined [%s]\n", newPlayer.id, ipAddr);
     } else {
-      packetInfo p = packetServer(PKT_REJECT_JOIN, "Already in server", 18);
+      packetInfo p = packetServer(PKT_REJECT_JOIN, "Server rejected", 16);
       sendPacketTo(server, &sender, len, p);
     }
 
