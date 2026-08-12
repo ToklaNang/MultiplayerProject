@@ -2,7 +2,9 @@
 #include "global.h"
 
 #define GLOBAL_IMPLEMENTATION
+#define RAYGUI_IMPLEMENTATION
 #include <pthread.h>
+#include <raygui.h>
 #include "global.h"
 #include <stdio.h>
 
@@ -149,11 +151,15 @@ int main(int argc, char **argv)
   pthread_t worker;
   pthread_create(&worker, NULL, handleClientConnection, (void*)&args);
 
-  SetTraceLogLevel(LOG_NONE);
+  SetTraceLogLevel(LOG_WARNING);
   InitWindow(CLIENT_WINDOW_WIDTH, CLIENT_WINDOW_HEIGHT, "Client");
   SetTargetFPS(60);
 
   clientIsReady = true;
+
+  RenderTexture gameCanvas = LoadRenderTexture(CLIENT_WINDOW_WIDTH, CLIENT_WINDOW_HEIGHT);
+  SetTextureFilter(gameCanvas.texture, TEXTURE_FILTER_POINT);
+
   while (!WindowShouldClose() && !clientShouldClose) {
     BeginDrawing();
     ClearBackground(WHITE);

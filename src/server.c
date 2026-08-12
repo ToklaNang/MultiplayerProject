@@ -39,7 +39,7 @@ void handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len)
     if (shouldJoin) {
       playerInfo newPlayer;
       newPlayer.id             = serverIdCounter++;
-      newPlayer.lastSeen       = 0.0f;
+      newPlayer.lastSeen       = serverCurrTick;
       newPlayer.state.onGround = false;
       newPlayer.ipAddr         = sender;
       newPlayer.state.velocity = (Vector2){  0.0f,   0.0f};
@@ -212,7 +212,7 @@ int main(int argc, char **argv)
 
         if (serverCurrTick - currP.lastSeen >= CLIENT_TIMEOUT_INTERVAL) {
           const char *ipAddr = inet_ntoa(currP.ipAddr.sin_addr);
-          printf("SERVER: Player %d left [%s]\n", currP.id, ipAddr);
+          printf("SERVER: Player %d got kicked [%s]\n", currP.id, ipAddr);
 
           _popIndex(players, n);
           n = 0; // Reset and look again
