@@ -42,13 +42,17 @@ vecPlayerState  currState = _vectorEmpty(vecPlayerState);
 playerState     player;
 pthread_mutex_t lock;
 
-int main()
+int main(int argc, char **argv)
 {
+  if (argc < 3) {
+    fprintf(stderr, "Expected two arguments (ip, port)\n");
+    return -1;
+  }
   SetConsoleCtrlHandler(consoleCtrlHandler, true);
 
   struct threadArgs args;
-  args.ipAddr = "stank-portage.tun.ply.gg";
-  args.port   = "47292";
+  args.ipAddr = argv[1];
+  args.port   = argv[2];
 
   // Create another thread to handle client->server connection
   // while the main thread handle main game
@@ -219,7 +223,7 @@ void playerLoop(playerState *p, float deltaTime)
     p->velocity.x += PLAYER_MOVE_SPEED;
 
   if (IsKeyDown(KEY_SPACE) && p->onGround)
-    p->velocity.y = -PLAYER_JUMP_FORCE;
+    p->velocity.y = -600.0f;
 
   p->velocity.y += GRAVITY;
   p->velocity.x *= FRICTION;
