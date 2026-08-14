@@ -29,28 +29,26 @@ void  terminateClient();
 int   consoleCtrlHandler(unsigned long ctrlType);
 void *handleClientConnection(void *args);
 
-eventInfo currEvent;
-uint32_t  assignedId        = 0;
+void playerLoop(playerState *p, float deltaTime);
+void drawPlayer(playerState p);
+
+uint64_t  currServerTick    = 0;
 SOCKET    client            = INVALID_SOCKET;
 bool      clientIsReady     = false;
 bool      clientShouldClose = false;
 
-drawQueue       dq;
 vecPlayerState  prevState = _vectorEmpty(vecPlayerState);
 vecPlayerState  currState = _vectorEmpty(vecPlayerState);
-pthread_mutex_t isWriting;
+playerState     player;
+pthread_mutex_t lock;
 
-int main(int argc, char **argv)
+int main()
 {
-  if (argc < 3) {
-    fprintf(stderr, "ERROR: Expected an argument (ip port)\n");
-    return -1;
-  }
   SetConsoleCtrlHandler(consoleCtrlHandler, true);
 
   struct threadArgs args;
-  args.ipAddr = argv[1];
-  args.port   = argv[2];
+  args.ipAddr = "stank-portage.tun.ply.gg";
+  args.port   = "47292";
 
   // Create another thread to handle client->server connection
   // while the main thread handle main game
@@ -58,29 +56,24 @@ int main(int argc, char **argv)
   pthread_create(&worker, NULL, handleClientConnection, (void*)&args);
 
   SetTraceLogLevel(LOG_WARNING);
+  SetConfigFlags(FLAG_WINDOW_ALWAYS_RUN);
+
   InitWindow(CLIENT_WINDOW_WIDTH, CLIENT_WINDOW_HEIGHT, "Client");
   SetTargetFPS(60);
 
   clientIsReady = true;
 
-  RenderTexture gameCanvas = LoadRenderTexture(CLIENT_WINDOW_WIDTH, CLIENT_WINDOW_HEIGHT);
-  SetTextureFilter(gameCanvas.texture, TEXTURE_FILTER_POINT);
-
   while (!clientShouldClose && !WindowShouldClose()) {
     BeginDrawing();
     ClearBackground(WHITE);
 
-    currEvent.leftKeyDown  = (IsKeyDown(KEY_A))     ? true : false;
-    currEvent.rightKeyDown = (IsKeyDown(KEY_D))     ? true : false;
-    currEvent.jmpKeyDown   = (IsKeyDown(KEY_SPACE)) ? true : false;
-    
-    pthread_mutex_lock(&isWriting);
-    for (int n = 0; n < currState.len; n++) {
-      playerState ps = _at(currState, n);
+    pthread_mutex_lock(&lock);
 
-      DrawRectangleV(ps.position, ps.scale, ps.color);
-    }
-    pthread_mutex_unlock(&isWriting);
+    for (int n = 0; n < currState.len; n++)
+      drawPlayer(_at(currState, n));
+    drawPlayer(player);
+
+    pthread_mutex_unlock(&lock);
 
     DrawFPS(10, 10);
     EndDrawing();
@@ -114,7 +107,7 @@ int consoleCtrlHandler(unsigned long ctrlType)
 }
 void terminateClient()
 {
-  sendPacket(client, packetClient(PKT_PLAYER_LEFT, assignedId, NULL, 0));
+  sendPacket(client, packetClient(PKT_PLAYER_LEFT, player.id, NULL, 0));
 
   closesocket(client);
   clientShouldClose = true;
@@ -139,9 +132,9 @@ void *handleClientConnection(void *args)
     return NULL; 
   }
 
-  // Halt the client to not join the server until the
-  // Client GUI complete it's setup
-  while (!clientIsReady) {}
+  // Spin wait the client until the GUI setup
+  // is completed
+  while (!clientIsReady);
 
   // Request to join server
   sendPacket(client, packetClient(PKT_REQUEST_JOIN, 0, NULL, 0));
@@ -160,12 +153,20 @@ void *handleClientConnection(void *args)
     clientShouldClose = true;
     return NULL;
   }
-  assignedId = ntohl(*(uint32_t*)p.payload);
+  
+  pthread_mutex_lock(&lock);
+  player = unserializePlayer(p.payload);
+  pthread_mutex_unlock(&lock);
 
   while (!clientShouldClose) {
-    char eventPacket[sizeof(currEvent)];
-    serializeEvent(eventPacket, currEvent);
-    sendPacket(client, packetClient(PKT_PLAYER_UPDATE, assignedId, eventPacket, sizeof(eventPacket)));
+    pthread_mutex_lock(&lock);
+    playerLoop(&player, 1.0f / SERVER_TPS);
+
+    char payload[sizeof(player)];
+    serializePlayer(payload, player);
+    sendPacket(client, packetClient(PKT_PLAYER_UPDATE, player.id, payload, sizeof(payload)));
+    
+    pthread_mutex_unlock(&lock);
 
     packetInfo p;
     recvPacket(client, &p);
@@ -176,7 +177,7 @@ void *handleClientConnection(void *args)
       break;
     }
     case PKT_WORLD_SNAP: {
-      pthread_mutex_lock(&isWriting);
+      pthread_mutex_lock(&lock);
 
       vecPlayerState tmp = currState;
       currState          = prevState;
@@ -186,14 +187,19 @@ void *handleClientConnection(void *args)
       size_t offset = 0;
 
       _vecDes(prevState);
+
+      currServerTick = ntohl(_readFromByte(p.payload, offset, uint32_t));
       for (int n = 0; n < amount; n++) {
         playerState state  = unserializePlayer(p.payload + offset);
         offset            += sizeof(playerState);
 
+        if (state.id == player.id)
+          continue;
+
         _pushBack(prevState, state);
       }
 
-      pthread_mutex_unlock(&isWriting);
+      pthread_mutex_unlock(&lock);
       
       break;
     }
@@ -203,4 +209,47 @@ void *handleClientConnection(void *args)
 
   WSACleanup();
   return NULL;
+}
+void playerLoop(playerState *p, float deltaTime)
+{
+  if (IsKeyDown(KEY_A))
+    p->velocity.x -= PLAYER_MOVE_SPEED;
+  
+  if (IsKeyDown(KEY_D))
+    p->velocity.x += PLAYER_MOVE_SPEED;
+
+  if (IsKeyDown(KEY_SPACE) && p->onGround)
+    p->velocity.y = -PLAYER_JUMP_FORCE;
+
+  p->velocity.y += GRAVITY;
+  p->velocity.x *= FRICTION;
+
+  Vector2 step = Vector2Scale(p->velocity, deltaTime);
+  
+  if (p->position.y + p->scale.y + step.y >= CLIENT_WINDOW_HEIGHT) {
+    float   penetration = (p->position.y + p->scale.y + step.y) - CLIENT_WINDOW_HEIGHT;
+    Vector2 floorNorm   = {0.0f, -1.0f};
+
+    step = Vector2Add(step, Vector2Scale(floorNorm, penetration));
+
+    p->velocity.y = 0.0f;
+    p->onGround   = true;
+  } else
+    p->onGround = false;
+
+  p->position = Vector2Add(p->position, step);
+}
+void drawPlayer(playerState p)
+{
+  int         fontSize     = 20;
+  const char *overheadText = TextFormat("Player %d", p.id);
+  int         textWidth    = MeasureText(overheadText, fontSize);
+
+  Vector2 pos = {
+    (p.position.x + p.scale.x / 2.0f) -  (textWidth / 2.0f),
+    p.position.y - 30.0f  
+  };
+
+  DrawText(overheadText, pos.x, pos.y, fontSize, BLACK);
+  DrawRectangleV(p.position, p.scale, p.color);
 }

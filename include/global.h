@@ -12,9 +12,17 @@
 #include <vector.h>
 #include <stdlib.h>
 #include <raylib.h>
+#include <raymath.h>
 
 #define CLIENT_WINDOW_WIDTH  1280
 #define CLIENT_WINDOW_HEIGHT 720
+#define SERVER_TPS           60
+
+#define GRAVITY  9.81f
+#define FRICTION 0.85f
+
+#define PLAYER_MOVE_SPEED 70.0f
+#define PLAYER_JUMP_FORCE 450.0f
 
 #define PKT_REQUEST_JOIN  0
 #define PKT_ACCEPT_JOIN   1
@@ -31,25 +39,20 @@ typedef struct eventInfo           eventInfo;
 typedef _vectorObject(playerInfo)  vecPlayerInfo;
 typedef _vectorObject(playerState) vecPlayerState;
 
-struct playerState {
+struct playerState 
+{
+  uint32_t id;
+
   Color   color;
   Vector2 scale;
   bool    onGround;
   Vector2 position;
   Vector2 velocity;
 };
-struct eventInfo {
-  bool jmpKeyDown;
-  bool leftKeyDown;
-  bool rightKeyDown;
-};
 struct playerInfo {
-  uint32_t    id;
   SOCKADDR_IN ipAddr;
   uint64_t    lastSeen;
-
   playerState state;
-  eventInfo   event;
 };
 struct packetInfo {
   uint32_t type;
@@ -69,9 +72,6 @@ packetInfo packetClient(uint32_t type, uint32_t id, char *payload, size_t len);
 
 void        serializePlayer(char *packet, playerState p);
 playerState unserializePlayer(char *packet);
-
-void      serializeEvent(char *packet, eventInfo ei);
-eventInfo unserializeEvent(char *packet);
 
 #ifdef GLOBAL_IMPLEMENTATION
 
@@ -181,6 +181,7 @@ packetInfo packetClient(uint32_t type, uint32_t id, char *payload, size_t len)
 void serializePlayer(char *packet, playerState p)
 {
   size_t offset = 0;
+  _writeToByte(packet, offset, htonl(p.id));
   _writeToByte(packet, offset, htonf(p.position.x));
   _writeToByte(packet, offset, htonf(p.position.y));
   _writeToByte(packet, offset, htonf(p.velocity.x));
@@ -200,6 +201,7 @@ playerState unserializePlayer(char *packet)
   playerState result;
   size_t      offset = 0;
 
+  result.id         = ntohl(_readFromByte(packet, offset, uint32_t));
   result.position.x = ntohf(_readFromByte(packet, offset, uint32_t));
   result.position.y = ntohf(_readFromByte(packet, offset, uint32_t));
   result.velocity.x = ntohf(_readFromByte(packet, offset, uint32_t));
@@ -214,24 +216,6 @@ playerState unserializePlayer(char *packet)
   result.color.b = _readFromByte(packet, offset, uint8_t);
   result.color.a = _readFromByte(packet, offset, uint8_t);
 
-  return result;
-}
-void serializeEvent(char *packet, eventInfo ei)
-{
-  size_t offset = 0;
-  _writeToByte(packet, offset, ei.leftKeyDown);
-  _writeToByte(packet, offset, ei.rightKeyDown);
-  _writeToByte(packet, offset, ei.jmpKeyDown);
-}
-eventInfo unserializeEvent(char *packet)
-{
-  eventInfo result;
-  size_t    offset = 0;
-  
-  result.leftKeyDown  = _readFromByte(packet, offset, uint8_t);
-  result.rightKeyDown = _readFromByte(packet, offset, uint8_t);
-  result.jmpKeyDown   = _readFromByte(packet, offset, uint8_t);
-  
   return result;
 }
 

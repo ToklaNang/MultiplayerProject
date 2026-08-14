@@ -3,24 +3,19 @@
 #include <stdio.h>
 #include "global.h"
 #include <pthread.h>
-#include <raymath.h>
 
-#define SERVER_TPS              60
 #define CLIENT_TIMEOUT_INTERVAL 300
-
-#define GRAVITY  9.81f
-#define FRICTION 0.85f
 
 int   consoleCtrlHandler(unsigned long ctrlType);
 void  handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len);
-void  playerLoop(playerInfo *p, double deltaTime);
 void *initiateServer(void *args);
 
-uint32_t      serverIdCounter   = 1;
-uint32_t      serverCurrTick    = 0;
-bool          serverShouldClose = false;
-SOCKET        server            = INVALID_SOCKET;
-vecPlayerInfo players           = _vectorEmpty(vecPlayerInfo);
+uint32_t        serverIdCounter   = 1;
+uint32_t        serverCurrTick    = 0;
+bool            serverShouldClose = false;
+SOCKET          server            = INVALID_SOCKET;
+vecPlayerInfo   players           = _vectorEmpty(vecPlayerInfo);
+pthread_mutex_t lock;
 
 int main(int argc, char **argv)
 {
@@ -54,6 +49,7 @@ int main(int argc, char **argv)
     accumulator    += elapses;
     previous        = current;
 
+    pthread_mutex_lock(&lock);
     while (accumulator >= tickInterval) {
       // Find player who's unresponsive (lost connection)
       // and remove them from player list
@@ -64,17 +60,21 @@ int main(int argc, char **argv)
           const char    *ipAddr  = inet_ntoa(currP.ipAddr.sin_addr);
           const u_short  srcPort = ntohs(currP.ipAddr.sin_port);
         
-          printf("SERVER: Player %d got kicked [%s:%d]\n", currP.id, ipAddr, srcPort);
-
+          packetInfo p = packetServer(PKT_FORCE_CLOSE, NULL, 0);
+          sendPacketTo(server,&currP.ipAddr, sizeof(currP.ipAddr), p);
+          printf("SERVER: Player %d got kicked [%s:%d]\n", currP.state.id, ipAddr, srcPort);
+          
           _popIndex(players, n);
           n = 0; // Reset and look again
         }
       }
 
       // Send snapshot of the world to each player
-      char   payload[sizeof(playerState) * players.len];
+      // Header (current tick) + players information (state)
+      char   payload[sizeof(uint64_t) + (sizeof(playerState) * players.len)];
       size_t offset = 0;
 
+      _writeToByte(payload, offset, htonl(serverCurrTick));
       for (int n = 0; n < players.len; n++) {
         playerState pState = _at(players, n).state;
 
@@ -87,14 +87,11 @@ int main(int argc, char **argv)
         playerInfo currP = _at(players, n);
         sendPacketTo(server, &currP.ipAddr, sizeof(currP.ipAddr), p);
       }
-
-      // Perform player loop (physics, ...)
-      for (int n = 0; n < players.len; n++)
-        playerLoop(_atP(players, n), 1.0f / SERVER_TPS);
         
       serverCurrTick++;
       accumulator -= tickInterval;
     }
+    pthread_mutex_unlock(&lock);
   }
 
   pthread_join(worker, NULL);
@@ -123,7 +120,8 @@ void handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len)
   switch (p.type) {
   case PKT_REQUEST_JOIN: {
     bool shouldJoin = true;
-
+    
+    pthread_mutex_lock(&lock);
     for (int n = 0; n < players.len; n++) {
       playerInfo currP = _at(players, n);
 
@@ -136,10 +134,13 @@ void handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len)
       shouldJoin = false;
       break;
     }
+    pthread_mutex_unlock(&lock);
 
     if (shouldJoin) {
       playerInfo newPlayer;
-      newPlayer.id             = serverIdCounter++;
+      char       payload[sizeof(playerState)];
+
+      newPlayer.state.id       = serverIdCounter++;
       newPlayer.lastSeen       = serverCurrTick;
       newPlayer.state.onGround = false;
       newPlayer.ipAddr         = sender;
@@ -147,14 +148,16 @@ void handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len)
       newPlayer.state.position = (Vector2){  0.0f,   0.0f};
       newPlayer.state.scale    = (Vector2){100.0f, 100.0f};
       newPlayer.state.color    = (Color)  {rand() % 255, rand() % 255, rand() % 255, 255};
-
-      _pushBack(players, newPlayer);
-
-      uint32_t idNet = htonl(newPlayer.id);
-      packetInfo p   = packetServer(PKT_ACCEPT_JOIN, (char*)&idNet, sizeof(idNet));
+      
+      serializePlayer(payload, newPlayer.state);
+      packetInfo p = packetServer(PKT_ACCEPT_JOIN, payload, sizeof(payload));
       sendPacketTo(server, &sender, len, p);
-        
-      printf("SERVER: Player %d joined [%s:%d]\n", newPlayer.id, ipAddr, srcPort);
+
+      pthread_mutex_lock(&lock);
+      _pushBack(players, newPlayer);
+      pthread_mutex_unlock(&lock);
+
+      printf("SERVER: Player %d joined [%s:%d]\n", newPlayer.state.id, ipAddr, srcPort);
     } else {
       char kickMsg[] = "Player with the same ip is already in server";
       packetInfo p = packetServer(PKT_REJECT_JOIN, kickMsg, sizeof(kickMsg));
@@ -164,60 +167,34 @@ void handleClientPacket(packetInfo p, SOCKADDR_IN sender, int len)
     break;
   }
   case PKT_PLAYER_UPDATE: {
+    pthread_mutex_lock(&lock);
     for (int n = 0; n < players.len; n++) {
-      playerInfo currP = _at(players, n);
+      playerInfo *currP = _atP(players, n);
 
-      if (currP.id != p.clientId) continue;
-      
-      players.items[n].event    = unserializeEvent(p.payload);
-      players.items[n].lastSeen = serverCurrTick;
+      if (currP->state.id != p.clientId) continue;
+
+      currP->lastSeen = serverCurrTick;
+      currP->state    = unserializePlayer(p.payload);
+      break;
     }
+    pthread_mutex_unlock(&lock);
     break;
   }
   case PKT_PLAYER_LEFT: {
+    pthread_mutex_lock(&lock);
     for (int n = 0; n < players.len; n++) {
       playerInfo currP = _at(players, n);
 
-      if (currP.id != p.clientId) continue;
+      if (currP.state.id != p.clientId) continue;
 
-      printf("SERVER: Player %d left [%s:%d]\n", currP.id, ipAddr, srcPort);
+      printf("SERVER: Player %d left [%s:%d]\n", currP.state.id, ipAddr, srcPort);
       _popIndex(players, n);
     }
+    pthread_mutex_unlock(&lock);
     break;
   }
   default: break;  
   }
-}
-void playerLoop(playerInfo *p, double deltaTime)
-{
-  // Register keystroke event
-  if (p->event.leftKeyDown)
-    p->state.velocity.x -= 70.f;
-  
-  if (p->event.rightKeyDown)
-    p->state.velocity.x += 70.0f;
-
-  if (p->event.jmpKeyDown && p->state.onGround)
-    p->state.velocity.y = -450.0f;
-
-  // Physic
-  p->state.velocity.y += GRAVITY;
-  p->state.velocity.x *= FRICTION;
-
-  Vector2 step = Vector2Scale(p->state.velocity, deltaTime);
-  
-  if (p->state.position.y + p->state.scale.y + step.y >= CLIENT_WINDOW_HEIGHT) {
-    float   penetration = (p->state.position.y + p->state.scale.y + step.y) - CLIENT_WINDOW_HEIGHT;
-    Vector2 floorNorm   = {0.0f, -1.0f};
-
-    step = Vector2Add(step, Vector2Scale(floorNorm, penetration));
-
-    p->state.velocity.y = 0.0f;
-    p->state.onGround   = true;
-  } else
-    p->state.onGround = false;
-
-  p->state.position = Vector2Add(p->state.position, step);
 }
 void *initiateServer(void *args)
 {
